@@ -10,6 +10,19 @@ then
  exit 0
 fi
 
+# Check which netcat variant is available
+if nc -h 2>&1 | grep -q "\-q"; then
+  NC_COMMAND="nc -l -p"
+  NC_COMMAND_EOF=" -q 0"
+  USING_NC_Q=true
+else
+  NC_COMMAND="nc -l -p"
+  NC_COMMAND_EOF=""
+  USING_NC_Q=false
+fi
+
+echo "Using netcat command: $NC_COMMAND with EOF flag: $NC_COMMAND_EOF"
+
 clear
 echo ""
 echo "Before you continue I assume your Internet is shared over Wi-Fi from this computer '$HOSTNAME'."
@@ -62,8 +75,26 @@ echo "First wait until you see some messages below......."
 echo ""
 /sbin/iptables -I FORWARD -p tcp --dport 443 -j DROP
 
-OUTPUT=`/usr/bin/tcpdump -n -i any port 31080 -c 1 2>/dev/null` || exit "tcpdump failed"
-IP=`echo $OUTPUT | cut -d\  -f7 | cut -d\. -f1,2,3,4`
+# Run tcpdump and handle possible errors
+TCPDUMP_OUTPUT=""
+echo "Starting tcpdump to listen for Toon connections..."
+for i in {1..5}; do
+  TCPDUMP_OUTPUT=$(/usr/bin/tcpdump -n -i any port 31080 -c 1 2>/dev/null)
+  if [ $? -eq 0 ] && [ ! -z "$TCPDUMP_OUTPUT" ]; then
+    break
+  fi
+  echo "Retrying tcpdump ($i/5)..."
+  sleep 3
+done
+
+if [ -z "$TCPDUMP_OUTPUT" ]; then
+  echo "ERROR: tcpdump failed to capture any traffic from Toon."
+  echo "Make sure your Toon is correctly connected to your WiFi network."
+  echo "Check if tcpdump is installed with 'which tcpdump'."
+  exit 1
+fi
+
+IP=`echo $TCPDUMP_OUTPUT | cut -d\  -f7 | cut -d\. -f1,2,3,4`
 
 echo ""
 echo "The Toon is connecting to IP: $IP"
@@ -91,13 +122,25 @@ DONE=false
 
 while ! $DONE 
 do
-cat /tmp/pipe.out | nc -l -p 31080 -q 0| tee /tmp/pipe.in &
+echo "Waiting for activation request..."
+
+if [ "$USING_NC_Q" = true ]; then
+  echo "Using netcat with -q option"
+  cat /tmp/pipe.out | nc -l -p 31080 -q 0 | tee /tmp/pipe.in &
+else
+  echo "Using netcat without -q option"
+  cat /tmp/pipe.out | (nc -l -p 31080 || true) | tee /tmp/pipe.in &
+fi
+
+NC_PID=$!
+echo "Netcat PID: $NC_PID"
 
 while read line
 do
-echo $LINE
+echo "Received: $line"
 if [[ $line = *"action class"* ]]
 then
+  echo "Found action class line"
   COMMONNAME=`echo $line | sed 's/.* commonname="\(.*\)".*/\1/'`
   UUID="$COMMONNAME:happ_scsync" 
   REQUESTID=`echo $line | sed 's/.* requestid="\(.*\)" .*/\1/'`
@@ -105,20 +148,26 @@ then
 fi
 if [[ $line = *"<u:getInformation"* ]]
 then
-  echo "Ok sending the reponse for the activation request"
+  echo "Ok sending the response for the activation request"
   echo -e $TOSEND > /tmp/pipe.out
   DONE=true
 elif [[ $line = *"token"* ]]
 then
-  echo "This is not a activation request."
+  echo "This is not an activation request."
   echo "" > /tmp/pipe.out
 fi
   
 done < /tmp/pipe.in
 
+if [ "$DONE" = false ]; then
+  echo "No valid activation request received. Waiting for another connection..."
+  kill $NC_PID 2>/dev/null
+  sleep 1
+fi
+
 done
 
-echo "I received the activation request and send back a bogues reponse to allow the activation to proceed."
+echo "I received the activation request and sent back a response to allow the activation to proceed."
 echo "Go on and accept the shown empty settings."
 
 RESPONSE='HTTP/1.1 200 OK\n\n
@@ -152,13 +201,25 @@ DONE=false
 
 while ! $DONE 
 do
-cat /tmp/pipe.out | nc -l -p 31080 -q 0| tee /tmp/pipe.in &
+echo "Waiting for registration confirmation request..."
+
+if [ "$USING_NC_Q" = true ]; then
+  echo "Using netcat with -q option"
+  cat /tmp/pipe.out | nc -l -p 31080 -q 0 | tee /tmp/pipe.in &
+else
+  echo "Using netcat without -q option"
+  cat /tmp/pipe.out | (nc -l -p 31080 || true) | tee /tmp/pipe.in &
+fi
+
+NC_PID=$!
+echo "Netcat PID: $NC_PID"
 
 while read line
 do
-echo $LINE
+echo "Received: $line"
 if [[ $line = *"action class"* ]]
 then
+  echo "Found action class line"
   COMMONNAME=`echo $line | sed 's/.* commonname="\(.*\)".*/\1/'`
   UUID="$COMMONNAME:happ_scsync" 
   REQUESTID=`echo $line | sed 's/.* requestid="\(.*\)" .*/\1/'`
@@ -166,12 +227,18 @@ then
 fi
 if [[ $line = *"<u:RegisterQuby"* ]]
 then
-  echo "Ok sending the reponse for the activation confirm request"
+  echo "Ok sending the response for the activation confirm request"
   echo -e $TOSEND > /tmp/pipe.out
   DONE=true
 fi
   
 done < /tmp/pipe.in
+
+if [ "$DONE" = false ]; then
+  echo "No valid registration request received. Waiting for another connection..."
+  kill $NC_PID 2>/dev/null
+  sleep 1
+fi
 
 done
 
@@ -198,3 +265,9 @@ echo "After the reboot you see a 'Welkom' screen."
 echo ""
 echo "Press the big 'X' and you are ready for root-toon.sh "
 echo ""
+
+# Clean up
+ip addr del $IP/32 dev lo 2>/dev/null
+rm -f /tmp/pipe.in
+rm -f /tmp/pipe.out
+/sbin/iptables -D FORWARD -p tcp --dport 443 -j DROP 2>/dev/null
