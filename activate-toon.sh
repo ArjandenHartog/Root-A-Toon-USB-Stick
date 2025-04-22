@@ -10,6 +10,15 @@ then
  exit 0
 fi
 
+# Ensure we have required tools
+for cmd in nc curl tcpdump grep sed iptables ip mkfifo; do
+  if ! command -v $cmd &> /dev/null; then
+    echo "ERROR: Required command '$cmd' is not installed."
+    echo "Please install it with: apt update && apt install -y $cmd"
+    exit 1
+  fi
+done
+
 # Check which netcat variant is available
 if nc -h 2>&1 | grep -q "\-q"; then
   NC_COMMAND="nc -l -p"
@@ -41,7 +50,9 @@ rm -f /tmp/pipe.out
 killall -9 nc 2>/dev/null
 killall -9 cat 2>/dev/null
 
-/sbin/iptables -F FORWARD
+# Safely clear firewall rules
+echo "Cleaning up firewall rules..."
+/sbin/iptables -D FORWARD -p tcp --dport 443 -j DROP 2>/dev/null || true
 
 echo "-----------------------EITHER------------------------------------"
 echo "First bring up your Toon and wait until it is in the activation screen."
@@ -73,28 +84,66 @@ echo "Don't go back to the home activation screen."
 echo ""
 echo "First wait until you see some messages below......."
 echo ""
-/sbin/iptables -I FORWARD -p tcp --dport 443 -j DROP
+
+# Safely add iptables rule
+echo "Adding firewall rule to block HTTPS..."
+if ! /sbin/iptables -I FORWARD -p tcp --dport 443 -j DROP; then
+  echo "WARNING: Failed to add iptables rule. Trying alternative method..."
+  # Try with sudo explicitly
+  sudo /sbin/iptables -I FORWARD -p tcp --dport 443 -j DROP || echo "ERROR: Could not add iptables rule. The script may not work correctly."
+fi
 
 # Run tcpdump and handle possible errors
-TCPDUMP_OUTPUT=""
 echo "Starting tcpdump to listen for Toon connections..."
-for i in {1..5}; do
-  TCPDUMP_OUTPUT=$(/usr/bin/tcpdump -n -i any port 31080 -c 1 2>/dev/null)
-  if [ $? -eq 0 ] && [ ! -z "$TCPDUMP_OUTPUT" ]; then
+TCPDUMP_OUTPUT=""
+MAX_ATTEMPTS=10
+for i in $(seq 1 $MAX_ATTEMPTS); do
+  echo "Listening attempt $i/$MAX_ATTEMPTS..."
+  TCPDUMP_OUTPUT=$(/usr/bin/tcpdump -n -i any port 31080 -c 1 2>/dev/null || true)
+  
+  if [ ! -z "$TCPDUMP_OUTPUT" ]; then
+    echo "Captured traffic from Toon!"
     break
   fi
-  echo "Retrying tcpdump ($i/5)..."
+  
+  # If we're on attempt 5, try alternative method
+  if [ $i -eq 5 ]; then
+    echo "Having trouble capturing packets. Trying to find your network interfaces..."
+    INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo)
+    echo "Available interfaces: $INTERFACES"
+    
+    # Try each interface
+    for iface in $INTERFACES; do
+      echo "Trying interface $iface..."
+      TCPDUMP_OUTPUT=$(/usr/bin/tcpdump -n -i $iface port 31080 -c 1 -v 2>/dev/null || true)
+      if [ ! -z "$TCPDUMP_OUTPUT" ]; then
+        echo "Success with interface $iface!"
+        break 2
+      fi
+    done
+  fi
+  
+  echo "No traffic detected, retrying in 3 seconds..."
   sleep 3
 done
 
 if [ -z "$TCPDUMP_OUTPUT" ]; then
-  echo "ERROR: tcpdump failed to capture any traffic from Toon."
-  echo "Make sure your Toon is correctly connected to your WiFi network."
-  echo "Check if tcpdump is installed with 'which tcpdump'."
-  exit 1
+  echo "ERROR: Failed to capture any traffic from Toon after $MAX_ATTEMPTS attempts."
+  echo ""
+  echo "Please manually enter the IP address of your Toon if you know it (or press Enter to exit):"
+  read MANUAL_TOON_IP
+  
+  if [ -z "$MANUAL_TOON_IP" ]; then
+    echo "Exiting. Please try again after checking your network connection."
+    exit 1
+  else
+    echo "Using manually entered IP: $MANUAL_TOON_IP"
+    # Use a dummy service center IP
+    IP="1.2.3.4"
+  fi
+else
+  IP=$(echo $TCPDUMP_OUTPUT | cut -d\  -f7 | cut -d\. -f1,2,3,4)
 fi
-
-IP=`echo $TCPDUMP_OUTPUT | cut -d\  -f7 | cut -d\. -f1,2,3,4`
 
 echo ""
 echo "The Toon is connecting to IP: $IP"
@@ -102,8 +151,14 @@ echo "The Toon is connecting to IP: $IP"
 echo ""
 echo "Try to activate."
 
-/sbin/ip addr add $IP/32 dev lo 2>/dev/null
+# Add IP address to loopback safely
+echo "Adding service center IP to loopback interface..."
+if ! /sbin/ip addr add $IP/32 dev lo 2>/dev/null; then
+  echo "WARNING: Failed to add IP address to loopback. Trying alternative method..."
+  sudo /sbin/ip addr add $IP/32 dev lo 2>/dev/null || echo "ERROR: Could not add IP address. The script may not work correctly."
+fi
 
+# Create pipes if they don't exist
 [ -f /tmp/pipe.in ] || /usr/bin/mkfifo /tmp/pipe.in
 [ -f /tmp/pipe.out ] || /usr/bin/mkfifo /tmp/pipe.out
 
@@ -119,10 +174,12 @@ RESPONSE='HTTP/1.1 200 OK\n\n
 '
 
 DONE=false
+MAX_ATTEMPTS=5
+ATTEMPT=1
 
-while ! $DONE 
+while ! $DONE && [ $ATTEMPT -le $MAX_ATTEMPTS ]
 do
-echo "Waiting for activation request..."
+echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Waiting for activation request..."
 
 if [ "$USING_NC_Q" = true ]; then
   echo "Using netcat with -q option"
@@ -135,34 +192,81 @@ fi
 NC_PID=$!
 echo "Netcat PID: $NC_PID"
 
-while read line
-do
-echo "Received: $line"
-if [[ $line = *"action class"* ]]
-then
-  echo "Found action class line"
-  COMMONNAME=`echo $line | sed 's/.* commonname="\(.*\)".*/\1/'`
-  UUID="$COMMONNAME:happ_scsync" 
-  REQUESTID=`echo $line | sed 's/.* requestid="\(.*\)" .*/\1/'`
-  TOSEND=`echo $RESPONSE | sed "s/_REQUESTID_/$REQUESTID/" | sed "s/_DESTCOMMONNAME_/$COMMONNAME/" | sed "s/_DESTUUID_/$UUID/" `
-fi
-if [[ $line = *"<u:getInformation"* ]]
-then
-  echo "Ok sending the response for the activation request"
-  echo -e $TOSEND > /tmp/pipe.out
-  DONE=true
-elif [[ $line = *"token"* ]]
-then
-  echo "This is not an activation request."
-  echo "" > /tmp/pipe.out
-fi
+# Set a timeout for netcat
+TIMEOUT=60
+TIMEOUT_COUNT=0
+
+while [ $TIMEOUT_COUNT -lt $TIMEOUT ] && ! $DONE; do
+  if ! ps -p $NC_PID > /dev/null; then
+    echo "Netcat process died unexpectedly. Restarting..."
+    break
+  fi
   
-done < /tmp/pipe.in
+  if [ -s /tmp/pipe.in ]; then
+    # Process the input if there's data
+    while read -t 1 line; do
+      if [ -z "$line" ]; then 
+        continue
+      fi
+      
+      echo "Received: $line"
+      
+      if [[ $line = *"action class"* ]]; then
+        echo "Found action class line"
+        COMMONNAME=$(echo $line | sed 's/.* commonname="\(.*\)".*/\1/' || echo "unknown")
+        UUID="$COMMONNAME:happ_scsync" 
+        REQUESTID=$(echo $line | sed 's/.* requestid="\(.*\)" .*/\1/' || echo "unknown")
+        TOSEND=$(echo $RESPONSE | sed "s/_REQUESTID_/$REQUESTID/" | sed "s/_DESTCOMMONNAME_/$COMMONNAME/" | sed "s/_DESTUUID_/$UUID/")
+      fi
+      
+      if [[ $line = *"<u:getInformation"* ]]; then
+        echo "Ok sending the response for the activation request"
+        echo -e $TOSEND > /tmp/pipe.out
+        DONE=true
+        break
+      elif [[ $line = *"token"* ]]; then
+        echo "This is not an activation request."
+        echo "" > /tmp/pipe.out
+      fi
+    done < /tmp/pipe.in
+  fi
+  
+  sleep 1
+  TIMEOUT_COUNT=$((TIMEOUT_COUNT+1))
+  
+  # Show a progress indicator every 5 seconds
+  if [ $((TIMEOUT_COUNT % 5)) -eq 0 ]; then
+    echo -n "."
+  fi
+done
+
+echo ""
 
 if [ "$DONE" = false ]; then
-  echo "No valid activation request received. Waiting for another connection..."
-  kill $NC_PID 2>/dev/null
-  sleep 1
+  echo "No valid activation request received in attempt $ATTEMPT."
+  # Kill the current netcat process before starting a new one
+  if ps -p $NC_PID > /dev/null; then
+    echo "Killing netcat process $NC_PID"
+    kill $NC_PID 2>/dev/null
+  fi
+  sleep 2
+  ATTEMPT=$((ATTEMPT+1))
+  
+  if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+    echo "Retrying..."
+    # Clear the pipes
+    cat /tmp/pipe.in > /dev/null || true
+    cat /tmp/pipe.out > /dev/null || true
+  else
+    echo "Failed to receive a valid activation request after $MAX_ATTEMPTS attempts."
+    echo "Please try again and make sure your Toon is properly connected to your WiFi."
+    # Clean up
+    ip addr del $IP/32 dev lo 2>/dev/null || true
+    rm -f /tmp/pipe.in
+    rm -f /tmp/pipe.out
+    /sbin/iptables -D FORWARD -p tcp --dport 443 -j DROP 2>/dev/null || true
+    exit 1
+  fi
 fi
 
 done
@@ -198,10 +302,11 @@ RESPONSE='HTTP/1.1 200 OK\n\n
 '
 
 DONE=false
+ATTEMPT=1
 
-while ! $DONE 
+while ! $DONE && [ $ATTEMPT -le $MAX_ATTEMPTS ]
 do
-echo "Waiting for registration confirmation request..."
+echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Waiting for registration confirmation request..."
 
 if [ "$USING_NC_Q" = true ]; then
   echo "Using netcat with -q option"
@@ -214,30 +319,72 @@ fi
 NC_PID=$!
 echo "Netcat PID: $NC_PID"
 
-while read line
-do
-echo "Received: $line"
-if [[ $line = *"action class"* ]]
-then
-  echo "Found action class line"
-  COMMONNAME=`echo $line | sed 's/.* commonname="\(.*\)".*/\1/'`
-  UUID="$COMMONNAME:happ_scsync" 
-  REQUESTID=`echo $line | sed 's/.* requestid="\(.*\)" .*/\1/'`
-  TOSEND=`echo $RESPONSE | sed "s/_REQUESTID_/$REQUESTID/" | sed "s/_DESTCOMMONNAME_/$COMMONNAME/" | sed "s/_DESTUUID_/$UUID/" `
-fi
-if [[ $line = *"<u:RegisterQuby"* ]]
-then
-  echo "Ok sending the response for the activation confirm request"
-  echo -e $TOSEND > /tmp/pipe.out
-  DONE=true
-fi
+# Set a timeout for netcat
+TIMEOUT=60
+TIMEOUT_COUNT=0
+
+while [ $TIMEOUT_COUNT -lt $TIMEOUT ] && ! $DONE; do
+  if ! ps -p $NC_PID > /dev/null; then
+    echo "Netcat process died unexpectedly. Restarting..."
+    break
+  fi
   
-done < /tmp/pipe.in
+  if [ -s /tmp/pipe.in ]; then
+    # Process the input if there's data
+    while read -t 1 line; do
+      if [ -z "$line" ]; then 
+        continue
+      fi
+      
+      echo "Received: $line"
+      
+      if [[ $line = *"action class"* ]]; then
+        echo "Found action class line"
+        COMMONNAME=$(echo $line | sed 's/.* commonname="\(.*\)".*/\1/' || echo "unknown")
+        UUID="$COMMONNAME:happ_scsync" 
+        REQUESTID=$(echo $line | sed 's/.* requestid="\(.*\)" .*/\1/' || echo "unknown")
+        TOSEND=$(echo $RESPONSE | sed "s/_REQUESTID_/$REQUESTID/" | sed "s/_DESTCOMMONNAME_/$COMMONNAME/" | sed "s/_DESTUUID_/$UUID/")
+      fi
+      
+      if [[ $line = *"<u:RegisterQuby"* ]]; then
+        echo "Ok sending the response for the activation confirm request"
+        echo -e $TOSEND > /tmp/pipe.out
+        DONE=true
+        break
+      fi
+    done < /tmp/pipe.in
+  fi
+  
+  sleep 1
+  TIMEOUT_COUNT=$((TIMEOUT_COUNT+1))
+  
+  # Show a progress indicator every 5 seconds
+  if [ $((TIMEOUT_COUNT % 5)) -eq 0 ]; then
+    echo -n "."
+  fi
+done
+
+echo ""
 
 if [ "$DONE" = false ]; then
-  echo "No valid registration request received. Waiting for another connection..."
-  kill $NC_PID 2>/dev/null
-  sleep 1
+  echo "No valid registration request received in attempt $ATTEMPT."
+  # Kill the current netcat process before starting a new one
+  if ps -p $NC_PID > /dev/null; then
+    echo "Killing netcat process $NC_PID"
+    kill $NC_PID 2>/dev/null
+  fi
+  sleep 2
+  ATTEMPT=$((ATTEMPT+1))
+  
+  if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+    echo "Retrying..."
+    # Clear the pipes
+    cat /tmp/pipe.in > /dev/null || true
+    cat /tmp/pipe.out > /dev/null || true
+  else
+    echo "Failed to receive a valid registration request after $MAX_ATTEMPTS attempts."
+    echo "Please continue with the next steps and if it doesn't work, try running the script again."
+  fi
 fi
 
 done
@@ -267,7 +414,8 @@ echo "Press the big 'X' and you are ready for root-toon.sh "
 echo ""
 
 # Clean up
-ip addr del $IP/32 dev lo 2>/dev/null
+echo "Cleaning up..."
+ip addr del $IP/32 dev lo 2>/dev/null || true
 rm -f /tmp/pipe.in
 rm -f /tmp/pipe.out
-/sbin/iptables -D FORWARD -p tcp --dport 443 -j DROP 2>/dev/null
+/sbin/iptables -D FORWARD -p tcp --dport 443 -j DROP 2>/dev/null || true
