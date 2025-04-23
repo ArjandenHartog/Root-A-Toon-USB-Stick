@@ -1,1 +1,58 @@
- 
+#!/bin/sh
+# Enhanced payload with better logging and local files
+/qmf/bin/bxt -d :happ_usermsg -s Notification -n CreateNotification -a type -v task -a subType -v notify -a text -v "Rooting your toon - please wait" 2>/dev/null >/dev/null
+
+echo "Rooting your toon started at $(date)" > /qmf/www/rsrc/log
+echo "Patching firewall" >> /qmf/www/rsrc/log
+sed -i 's/^#-A/-A/' /etc/default/iptables.conf 2>&1 >> /qmf/www/rsrc/log
+echo "Firewall patched, result: $?" >> /qmf/www/rsrc/log
+
+echo "Getting device type..." >> /qmf/www/rsrc/log
+if grep -q nxt /etc/opkg/arch.conf 2>/dev/null
+then
+    echo "Detected NXT device, installing dropbear and setting password" >> /qmf/www/rsrc/log
+    echo "Copying dropbear_2014.66-r0_cortexa9hf-vfp-neon.ipk from host" >> /qmf/www/rsrc/log
+    cp /tmp/dropbear_2014.66-r0_cortexa9hf-vfp-neon.ipk /tmp/ 2>&1 >> /qmf/www/rsrc/log
+    echo "Installing dropbear" >> /qmf/www/rsrc/log
+    opkg install /tmp/dropbear_2014.66-r0_cortexa9hf-vfp-neon.ipk 2>&1 >> /qmf/www/rsrc/log
+    echo "Opkg install result: $?" >> /qmf/www/rsrc/log
+    echo "Setting password" >> /qmf/www/rsrc/log
+    sed -i 's/root:DISABLED/root:FTR0zlZvsHEF2/' /etc/shadow 2>&1 >> /qmf/www/rsrc/log
+    echo "Password set result: $?" >> /qmf/www/rsrc/log
+else
+    echo "Detected QB2 device, installing dropbear and setting password" >> /qmf/www/rsrc/log
+    echo "Copying dropbear_2015.71-r0_qb2.ipk from host" >> /qmf/www/rsrc/log
+    cp /tmp/dropbear_2015.71-r0_qb2.ipk /tmp/ 2>&1 >> /qmf/www/rsrc/log
+    echo "Installing dropbear" >> /qmf/www/rsrc/log
+    opkg install /tmp/dropbear_2015.71-r0_qb2.ipk 2>&1 >> /qmf/www/rsrc/log
+    echo "Opkg install result: $?" >> /qmf/www/rsrc/log
+    echo "Setting password" >> /qmf/www/rsrc/log
+    sed -i 's/root:DISABLED/root:FTR0zlZvsHEF2/' /etc/passwd 2>&1 >> /qmf/www/rsrc/log
+    echo "Password set result: $?" >> /qmf/www/rsrc/log
+fi
+
+echo "Restarting iptables" >> /qmf/www/rsrc/log
+/etc/init.d/iptables restart 2>&1 >> /qmf/www/rsrc/log
+echo "Iptables restart result: $?" >> /qmf/www/rsrc/log
+
+echo "Starting dropbear" >> /qmf/www/rsrc/log
+/etc/init.d/dropbear start 2>&1 >> /qmf/www/rsrc/log
+echo "Dropbear start result: $?" >> /qmf/www/rsrc/log
+
+echo "Copying update-rooted.sh" >> /qmf/www/rsrc/log
+cp /tmp/update-rooted.sh /root/ 2>&1 >> /qmf/www/rsrc/log
+echo "Copy result: $?" >> /qmf/www/rsrc/log
+
+echo "Running update script fixes" >> /qmf/www/rsrc/log
+chmod +x /root/update-rooted.sh 2>&1 >> /qmf/www/rsrc/log
+/root/update-rooted.sh -f 2>&1 >> /qmf/www/rsrc/log
+echo "Update script result: $?" >> /qmf/www/rsrc/log
+
+echo "Restarting GUI" >> /qmf/www/rsrc/log
+killall -9 qt-gui 2>&1 >> /qmf/www/rsrc/log
+echo "GUI restart result: $?" >> /qmf/www/rsrc/log
+
+echo "Root process completed at $(date)" >> /qmf/www/rsrc/log
+echo "SSH should now be accessible with username: root, password: toon" >> /qmf/www/rsrc/log
+echo "### Reached End Of Job ###" >> /qmf/www/rsrc/log
+sync 

