@@ -33,20 +33,8 @@ usage() {
 
 
 autoUpdate() {
-	MD5ME=`/usr/bin/md5sum $0 | cut -d\  -f1`
-	MD5ONLINE=`curl --compressed -Nks https://raw.githubusercontent.com/ToonSoftwareCollective/update-rooted/main/update-rooted.md5 | cut -d\  -f1`
-	if [ !  "$MD5ME" == "$MD5ONLINE" ]
-	then
-		echo "Warning: there is a new version of update-rooted.sh available! Do you want me to download it for you (yes/no)?" 
-		if ! $UNATTENDED ; then read QUESTION ; fi	
-		if [  "$QUESTION" == "yes" ] &&  ! $UNATTENDED #no auto update in unattended mode
-		then
-			curl --compressed -Nks https://raw.githubusercontent.com/ToonSoftwareCollective/update-rooted/main/update-rooted.sh -o $0
-			echo "Ok I downloaded the update. Restarting..." 
-			/bin/sh $0 $@
-			exit
-		fi
-	fi
+	echo "Automatic updates disabled in offline mode"
+	return 0
 }
 
 
@@ -178,30 +166,22 @@ editTenantSettingsFile(){
 }
 
 checkCApem() {
-        UPDATECA=false
-        SHA256ONLINE=`curl -Nks https://curl.se/ca/cacert.pem.sha256 | cut -d\  -f1`
-        SHA256CURRENT='false'
-        if [ -f /usr/local/share/ca-certificates/mozilla.crt ]
-        then
-                SHA256CURRENT=`/usr/bin/sha256sum /usr/local/share/ca-certificates/mozilla.crt | cut -d\  -f1`
-        fi
-        if [ !  "$SHA256CURRENT" == "$SHA256ONLINE" ] && [ -n "$SHA256ONLINE" ]
-        then
-                echo "There is a new version of the Mozilla CA pem file. Downloading it!"
-                /usr/bin/curl -Nks https://curl.se/ca/cacert.pem -o /tmp/mozilla.crt
-                SHA256NEW=`/usr/bin/sha256sum /tmp/mozilla.crt | cut -d\  -f1`
-                if [ "$SHA256ONLINE" == "$SHA256NEW" ]
-                then
-                        echo "Download ok! Replacing Mozilla CA pem file!"
-                        mv -f /tmp/mozilla.crt /usr/local/share/ca-certificates/mozilla.crt
-                        UPDATECA=true
-                fi
-        fi
+	# Aangepast: kopieer lokaal bestand indien aanwezig
+	UPDATECA=false
+	if [ -f /tmp/cacert.pem ] && [ ! -f /usr/local/share/ca-certificates/mozilla.crt ]
+	then
+		echo "Installing local CA certificate file"
+		mkdir -p /usr/local/share/ca-certificates
+		cp /tmp/cacert.pem /usr/local/share/ca-certificates/mozilla.crt
+		UPDATECA=true
+	else
+		echo "Skipping CA certificate update, using existing file or no local file found"
+	fi
 
-        if [ "$UPDATECA" = true ]
-        then
-                /usr/sbin/update-ca-certificates
-        fi
+	if [ "$UPDATECA" = true ]
+	then
+		/usr/sbin/update-ca-certificates
+	fi
 }
 
 disableHapps() {
@@ -280,62 +260,66 @@ removeNetworkErrorNotifications() {
 }
 
 installToonStoreApps() {
-	#we assume that all symbolic linked dirs are toonstore installed apps - IS THAT OK?
-	#toonstore is mandatory, if not yet installed, install it anyway
-	for a in toonstore `find /qmf/qml/apps -type l | sed 's#/qmf/qml/apps/##' | grep -v toonstore`
-	do
-		latestapp=`curl -NLks "https://api.github.com/repos/ToonSoftwareCollective/$a/releases/latest" | grep tag_name | cut -d\: -f2 | sed 's/.*"\(.*\)".*/\1/'`
-		if [ -s /HCBv2/qml/apps/$a/version.txt ] 
+	echo "ToonStore app updates disabled, please manually install apps later when you have internet"
+	
+	# Aangepaste code: Installeer lokale toonstore app indien beschikbaar
+	if [ -f /tmp/toonstore.tar.gz ]
+	then
+		echo "Installing local ToonStore app from /tmp/toonstore.tar.gz"
+		mkdir -p /tmp/toonstore-install
+		tar -xzf /tmp/toonstore.tar.gz -C /tmp/toonstore-install
+		if [ -d "/tmp/toonstore-install" ]
 		then
-			currentapp=`cat /HCBv2/qml/apps/$a/version.txt`
-		else
-			#allow install new version if current version isn't known
-			currentapp=""
-		fi
-		if [ -n "$latestapp" ] && [ ! "$latestapp" == "$currentapp" ]
-		then
-			echo -n "-- Updating custom app $a to release $latestapp ... "
-			TARBALL=`curl -NLks "https://api.github.com/repos/ToonSoftwareCollective/$a/releases/latest" | grep tarball | sed 's/.*: "\(.*\)".*/\1/'`	
-			rm -rf /tmp/$a-install
-			mkdir -p /tmp/$a-install
-		        curl -NLks "$TARBALL" -o /tmp/$a-install/$a.tar.gz
-		        cd /tmp/$a-install/
-		        if tar zxf $a.tar.gz
+			RESULT=`opkg list-installed toonstore`
+			if [ -n "${RESULT}" ]
 			then
-			        RESULT=`opkg list-installed $a`
-			        if [ -n "${RESULT}" ]
-			        then
-			                opkg remove $a
-			        fi
-			        #then remove every existing app version of the app
-			        rm -rf /qmf/qml/apps/$a*
-
-       		                APPDIR=`find /tmp/$a-install/ -type d -maxdepth 1 -mindepth 1`
-	                        mv $APPDIR /qmf/qml/apps/$a-$latestapp
-	                        #and make a symlink for the app to the appversion
-	                        ln -s /qmf/qml/apps/$a-$latestapp /qmf/qml/apps/$a
-	                        echo "DONE"
-			else
-				echo "FAILED"
+				opkg remove toonstore
 			fi
-
+			rm -rf /qmf/qml/apps/toonstore*
+			
+			APPDIR=`find /tmp/toonstore-install/ -type d -maxdepth 1 -mindepth 1`
+			VERSION=`cat $APPDIR/version.txt 2>/dev/null || echo "local"`
+			mv $APPDIR /qmf/qml/apps/toonstore-$VERSION
+			ln -s /qmf/qml/apps/toonstore-$VERSION /qmf/qml/apps/toonstore
+			echo "Installed ToonStore version $VERSION"
+		else
+			echo "Failed to extract toonstore.tar.gz"
 		fi
-	done
+	else
+		echo "WARNING: No local ToonStore app found at /tmp/toonstore.tar.gz!"
+	fi
 }
 
 
 getVersion() {
-	VERSIONS=`/usr/bin/curl -Nks --compressed "https://raw.githubusercontent.com/ToonSoftwareCollective/update-rooted/main/toonversions" | /usr/bin/tr '\n\r' ' ' | /bin/grep STARTTOONVERSIONS | /bin/sed 's/.*#STARTTOONVERSIONS//' | /bin/sed 's/#ENDTOONVERSIONS.*//' | xargs`
+	echo "Using hard-coded version list instead of downloading from GitHub"
+	# Fixed list of versions
+	VERSIONS="4.9.23 4.10.6 4.11.6 4.12.8 4.13.6 4.14.7 4.15.7 4.16.8 4.17.8 4.18.7 4.19.10"
+	
+	CUSTOM_REPO_URL="$1"
+	#determine current version
+	RUNNINGVERSION=$VERSION
 
-	if [ "$VERSIONS" == "" ]
+	VERS_5=0
+	if echo $VERSION | grep -q "5."
 	then
-		echo "Could not determine available versions from online sources. Using older well known verion list."
-		#online versions list not available, falling back to a small well known list
-		VERSIONS="2.9.26 3.0.29 3.0.32 3.1.22 3.2.14 3.2.18 3.3.8 3.4.4 3.5.4 3.6.3 3.7.8 3.7.9 4.3.20 4.4.21 4.7.23 4.8.25 4.9.23 4.10.6 4.11.6 4.12.0 4.13.6 4.13.7 4.15.2 4.15.6 4.16.8 4.18.8 4.19.10"
+		VERS_5=1
 	fi
 
-	#determine current version
-	RUNNINGVERSION=`opkg list-installed base-$ARCH-\* | sed -r -e "s/base-$ARCH-([a-z]{3})\s-\s([0-9]*\.[0-9]*\.[0-9]*)-.*/\2/"`
+	if [ "$VERSION" == "" ]
+	then
+		echo "Couldn't determine version. Please restart this script from a root shell at your Toon!"
+		exit
+	fi
+
+	echo ""
+	echo "VERSIONS AVAILABLE FROM TSC:"
+	echo ""
+	for VERSION in $VERSIONS
+	do
+		echo "Version: $VERSION"
+	done
+	echo ""
 
 	#determine current OPKG latest version
 	OPKGVERSION=`opkg list base-$ARCH-\* | sed -r -e "s/base-$ARCH-([a-z]{3})\s-\s([0-9]*\.[0-9]*\.[0-9]*)-.*/\2/" | sort -t'.' -k1n,1n -k2n,2n -k3n,3n | tail -n1`
@@ -595,46 +579,42 @@ enableVPN() {
 }
 
 downloadUpgradeFile() {
-	#try to get the upgrade file from the feed host
-	/usr/bin/wget  $SOURCE/$ARCH/upgrade/upgrade-$ARCH.sh -O $PKGCACHE/upgrade-$ARCH.sh -T 5 -t 5 --retry-connrefused -o /dev/null
-	RESULT=$?
-
-	if [ ! $RESULT == 0 ] ; then
-		echo "Could not download the upgrade script from the source." 
-		exitFail
-	fi
-
-	#check if there is a valid upgrade script
-	if [ "$ARCH" == "nxt" ] 
+	echo "Using local upgrade files instead of downloading from eneco server"
+	
+	PKGCACHE=/mnt/data/upgrade
+	
+	if [ ! -d "$PKGCACHE" ]
 	then
-		MD5SCRIPT="c5f3918503643c1d04aeba1b8eff89a2"
-	else
-		MD5SCRIPT="34db70c584e9a75bd8404bb306a4ee5a"
+		echo "Creating directory $PKGCACHE"
+		mkdir -p $PKGCACHE
 	fi
-	MD5NOW=`/usr/bin/md5sum $PKGCACHE/upgrade-$ARCH.sh | cut -d\  -f1`
-	if [ !  "$MD5NOW" == "$MD5SCRIPT" ]  && $ORIGINALSOURCE
+	
+	if [ -f /tmp/upgrade-$ARCH.sh ]
 	then
-		echo "Warning: upgrade script from Eneco server is changed. Do you want to continue downloading the files (if not sure, type no and report in the forums)?" 
-		if ! $UNATTENDED ; then read QUESTION; fi	
-		if [ ! "$QUESTION" == "yes" ] || $UNATTENDED  #also exit when untattended
+		echo "Found local upgrade script for $ARCH"
+		cp /tmp/upgrade-$ARCH.sh $PKGCACHE/upgrade-$ARCH.sh
+		if [ -f $PKGCACHE/upgrade-$ARCH.sh ]
 		then
-			exitFail
+			echo "Local upgrade script installed successfully"
+			chmod +x $PKGCACHE/upgrade-$ARCH.sh
+			
+			# Remove curl logging post to the service center
+			/bin/sed -i '/curl.*31080/c\echo ""' $PKGCACHE/upgrade-$ARCH.sh
+			
+			# Add the -test option to the upgrade script to make it non-fatal
+			/bin/sed -i 's/opkg -V 4 \/tmp/opkg -V 4 -test \/tmp/' $PKGCACHE/upgrade-$ARCH.sh
+			
+			echo "Upgrade script is prepared for local use"
+			return 0
+		else
+			echo "Failed to copy local upgrade script"
 		fi
+	else
+		echo "No local upgrade script found for $ARCH"
 	fi
-
-	#remove auto execute feature
-	/bin/sed -i 's/^\(FEATURES=.*\)AUTO_EXECUTE/\1/' $PKGCACHE/upgrade-$ARCH.sh 
-
-	#make sure the upgrade script doesn't reboot the device after finishing
-	/bin/sed -i '/shutdown/c\#rkemoved shutdown' $PKGCACHE/upgrade-$ARCH.sh 
-
-	#removing the curl logging post to the servic center
-	/bin/sed -i '/curl.*31080/c\echo ""' $PKGCACHE/upgrade-$ARCH.sh
-	/bin/sed -i '/grep -v LogMessageResponse/d' $PKGCACHE/upgrade-$ARCH.sh
-
-	#removing the pre exit BXT request (do not show restarting during update)
-	/bin/sed -i 's/-n InitiatePreExit/-n InitiatePreExit -t/' $PKGCACHE/upgrade-$ARCH.sh
-
+	
+	echo "Cannot proceed without upgrade script"
+	return 1
 }
 
 startPrepare() {
@@ -795,53 +775,42 @@ exitFail() {
 
 installTSCscript() {
 	#install boot script to download TSC helper script if necessary
-	echo "if [ ! -s /usr/bin/tsc ] || grep -q no-check-certificate /usr/bin/tsc ; then /usr/bin/curl -Nks --retry 5 --connect-timeout 2 https://raw.githubusercontent.com/ToonSoftwareCollective/tscSettings/main/tsc -o /usr/bin/tsc ; chmod +x /usr/bin/tsc ; fi ; if ! grep -q tscs /etc/inittab ; then sed -i '/qtqt/a\ tscs:245:respawn:/usr/bin/tsc >/var/log/tsc 2>&1' /etc/inittab ; if grep -q tscs /etc/inittab ; then init q ; fi ; fi" > /etc/rc5.d/S99tsc.sh
+	echo "if [ ! -s /usr/bin/tsc ] ; then cp /tmp/tsc /usr/bin/tsc 2>/dev/null || echo 'No local TSC script found' ; chmod +x /usr/bin/tsc ; fi ; if ! grep -q tscs /etc/inittab ; then sed -i '/qtqt/a\ tscs:245:respawn:/usr/bin/tsc >/var/log/tsc 2>&1' /etc/inittab ; if grep -q tscs /etc/inittab ; then init q ; fi ; fi" > /etc/rc5.d/S99tsc.sh
 	chmod +x /etc/rc5.d/S99tsc.sh
-	#fix TSC helper script download location (if necessary)
-	sed -i 's/IgorYbema/ToonSoftwareCollective/' /etc/rc5.d/S99tsc.sh
 
-	#download or update TSC helper script
-	/usr/bin/curl --compressed -fNks  --retry 5 --connect-timeout 2 https://raw.githubusercontent.com/ToonSoftwareCollective/tscSettings/main/tsc -o /usr/bin/tsc.new
-	RESULT=$?
-
-	if [ ! $RESULT == 0 ]
+	#installer lokale TSC script indien aanwezig
+	if [ -f /tmp/tsc ]
 	then
-		echo "[ERROR] Could not download TSC script from github!" 
-	else
-		#check for valid download
-		CURRENTTIME=`date +%s`
-		MD5TSCONLINE=`curl -Nks https://raw.githubusercontent.com/ToonSoftwareCollective/tscSettings/main/tsc.md5?$CURRENTTIME | cut -d\  -f1`
-		MD5TSCNOW=`/usr/bin/md5sum /usr/bin/tsc.new | cut -d\  -f1`
-		if [ "$MD5TSCNOW" == "$MD5TSCONLINE" ] && [ -n "$MD5TSCONLINE" ]
-		then
-			mv /usr/bin/tsc.new /usr/bin/tsc
-			chmod +x /usr/bin/tsc
-		fi
-	
+		echo "Installing local TSC script from /tmp/tsc"
+		cp /tmp/tsc /usr/bin/tsc
+		chmod +x /usr/bin/tsc
+		
 		#install tsc in inittab to run continously from boot
 		if ! grep -q tscs /etc/inittab
 		then
-			sed -i '/qtqt/a\tscs:245:respawn:/usr/bin/tsc >/var/log/tsc 2>&1' /etc/inittab
+			sed -i '/qtqt/a\ tscs:245:respawn:/usr/bin/tsc >/var/log/tsc 2>&1' /etc/inittab
 			init q
 		fi
+	else
+		echo "WARNING: No local TSC script found in /tmp/tsc! TSC features will not work."
 	fi
 }
 
 downloadResourceFile() {
-	#first install TSC script to make sure it does not conflict with update script
-	installTSCscript
-
-	RESOURCEFILEURL="https://raw.githubusercontent.com/ToonSoftwareCollective/resourcefiles/main/resources-$ARCH-$RUNNINGVERSION.zip"
-	/usr/bin/curl  --compressed -fNks  --retry 5 --connect-timeout 2  $RESOURCEFILEURL -o /tmp/resources-$ARCH-$RUNNINGVERSION.zip
-	RESULT=$?
-
-	if [ ! $RESULT == 0 ]
-	then 
-		echo "[ERROR] Could not download a resources.rcc file for this version! Continuing, but your custom apps probably dont work anymore" 
-	else 
-		mv /qmf/qml/resources-static-base.rcc /qmf/qml/resources-static-base.rcc.backup
-		mv /qmf/qml/resources-static-ebl.rcc /qmf/qml/resources-static-ebl.rcc.backup
-		/usr/bin/unzip -oq /tmp/resources-$ARCH-$RUNNINGVERSION.zip -d /qmf/qml
+	echo "Using local resource files instead of downloading from GitHub"
+	if [ -f /tmp/resources-$ARCH-$RUNNINGVERSION.zip ]
+	then
+		echo "Found local resource file for $ARCH-$RUNNINGVERSION"
+		mkdir -p /qmf/qml/
+		unzip -o /tmp/resources-$ARCH-$RUNNINGVERSION.zip -d /qmf/qml/
+		if [ -f /qmf/qml/resources-static-base.rcc ]
+		then
+			echo "Resource file installed successfully"
+		else
+			echo "Error installing resource file"
+		fi
+	else
+		echo "No local resource file found for $ARCH-$RUNNINGVERSION"
 	fi
 }
 

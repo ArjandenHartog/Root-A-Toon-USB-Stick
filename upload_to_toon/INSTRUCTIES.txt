@@ -1,0 +1,32 @@
+INSTRUCTIES VOOR HET KOPIËREN VAN BESTANDEN NAAR DE TOON
+============================================
+
+1. Kopieer de volgende bestanden naar de /tmp map op je Toon:
+   - cacert.pem 
+   - tsc
+   - toonstore.tar.gz
+
+2. Je kunt dit op een van de volgende manieren doen:
+
+   a) Via SCP vanaf een ander apparaat:
+      scp cacert.pem tsc toonstore.tar.gz root@[TOON-IP]:/tmp/
+      (Vervang [TOON-IP] door het IP-adres van je Toon)
+
+   b) Via een USB-stick:
+      - Kopieer de bestanden naar een USB-stick
+      - Sluit de USB-stick aan op de Toon
+      - Voer in op de Toon:
+        mkdir -p /tmp/usb
+        mount /dev/sda1 /tmp/usb
+        cp /tmp/usb/* /tmp/
+        umount /tmp/usb
+
+3. Voer het update-rooted.sh script uit met de vlag "-f" 
+   (dit zorgt ervoor dat alleen de bestanden worden aangepast):
+   
+   sh /root/update-rooted.sh -f
+
+4. Hierna kun je de Toon herstarten met:
+   reboot
+
+Na het herstarten zou je Toon volledig geroot moeten zijn, inclusief ToonStore! 

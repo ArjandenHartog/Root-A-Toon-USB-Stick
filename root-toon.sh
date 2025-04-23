@@ -165,6 +165,15 @@ do
       if [ -f "files/update-rooted.sh" ]; then
         DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}curl -s http://$LOCAL_IP:8000/update-rooted.sh -o update-rooted.sh && chmod +x update-rooted.sh && "
       fi
+      # Add tsc script download
+      if [ -f "files/tsc" ]; then
+        DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}curl -s http://$LOCAL_IP:8000/tsc -o /etc/rc5.d/S99tsc.sh && chmod +x /etc/rc5.d/S99tsc.sh && mkdir -p /tmp/upload_to_toon && "
+      fi
+      # Download the toonstore directory 
+      if [ -d "upload_to_toon/toonstore" ]; then
+        DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}mkdir -p /tmp/upload_to_toon/toonstore && "
+        DOWNLOAD_COMMANDS="${DOWNLOAD_COMMANDS}cd /tmp/upload_to_toon && curl -s http://$LOCAL_IP:8000/toonstore_files.tar.gz -o toonstore_files.tar.gz && tar -xzf toonstore_files.tar.gz && cd /tmp && "
+      fi
       
       PAYLOAD="${DOWNLOAD_COMMANDS}${PAYLOAD}"
       echo "Added commands to download files from http://$LOCAL_IP:8000"
