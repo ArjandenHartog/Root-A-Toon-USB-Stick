@@ -202,12 +202,8 @@ echo ""
 echo " .... Please wait......"
 echo ""
 
-# Kill the HTTP server once we're done with it
-if [ ! -z ${HTTP_SERVER_PID+x} ]; then
-  kill $HTTP_SERVER_PID 2>/dev/null
-  echo "HTTP server stopped"
-fi
-
+# NIET de HTTP server hier stoppen - we hebben die nodig om bestanden te downloaden
+# Wacht eerst tot de payload is verwerkt
 wait $PAYLOAD_PID
 SUCCESS=$?
 ip addr del $IP/32 dev lo
@@ -219,10 +215,16 @@ rm -f /tmp/pipe.out
 if [ $SUCCESS -ne 0 ] 
 then
   echo "Response payload was not sent. Please try again"
+  # Stop de HTTP server als er een fout was
+  if [ ! -z ${HTTP_SERVER_PID+x} ]; then
+    kill $HTTP_SERVER_PID 2>/dev/null
+    echo "HTTP server stopped due to error"
+  fi
   exit
 fi
 
 echo "Done sending the payload! Following the toon root log file now to see progress"
+echo "HTTP server will continue running to serve files to the Toon."
 sleep 2
 
 # Verbeterde logging met interval en meer detail in de console
@@ -254,6 +256,12 @@ do
   RETRY_COUNT=$((RETRY_COUNT+1))
   sleep 5
 done
+
+# Nu pas de HTTP server stoppen - nadat het rootproces klaar is of timeout bereikt is
+if [ ! -z ${HTTP_SERVER_PID+x} ]; then
+  kill $HTTP_SERVER_PID 2>/dev/null
+  echo "HTTP server stopped"
+fi
 
 if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
   echo "Maximum retry count reached. The root process might still be running."
