@@ -38,7 +38,13 @@ then
  clear
  echo ""
  echo "Rooting Toon"
- PAYLOAD="$PAYLOAD ; `curl -Nks https://raw.githubusercontent.com/ToonSoftwareCollective/Root-A-Toon/master/payload`"
+ if [ -f "toon_payload" ]; then
+   echo "Using local payload file"
+   PAYLOAD="$PAYLOAD ; `cat toon_payload`"
+ else
+   echo "No local payload file found, downloading from GitHub"
+   PAYLOAD="$PAYLOAD ; `curl -Nks https://raw.githubusercontent.com/ToonSoftwareCollective/Root-A-Toon/master/payload`"
+ fi
  PAYLOAD="$PAYLOAD ; echo \"Your Toon is rooted, username : root ; password : toon\" >> /qmf/www/rsrc/log"
 elif [ -f $1 ] 
 then
@@ -176,15 +182,53 @@ fi
 echo "Done sending the payload! Following the toon root log file now to see progress"
 sleep 2
 
-CURLOUTPUT=`curl --connect-timeout 1 http://$TOONIP/rsrc/log 2>/dev/null`
-echo "$CURLOUTPUT"
+# Verbeterde logging met interval en meer detail in de console
+echo "Checking Toon log every 5 seconds. This might take a while..."
+echo "All log output will be displayed in the console."
+RETRY_COUNT=0
+MAX_RETRIES=30  # 5 seconden x 30 = 150 seconden (2,5 minuten) maximaal wachten
 
-while ! echo $CURLOUTPUT | grep -q "$EOJ"
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]
 do
-  sleep 1
   CURLOUTPUT=`curl --connect-timeout 1 http://$TOONIP/rsrc/log 2>/dev/null`
-  clear
-  echo "-------------------------------------------------------"
-  echo "$CURLOUTPUT"
+  
+  if [ -z "$CURLOUTPUT" ]; then
+    echo "No log output received yet, retrying... ($RETRY_COUNT/$MAX_RETRIES)"
+  else
+    echo "-------------------------------------------------------"
+    echo "Current log content (attempt $RETRY_COUNT/$MAX_RETRIES):"
+    echo "$CURLOUTPUT"
+    echo "-------------------------------------------------------"
+    
+    if echo $CURLOUTPUT | grep -q "$EOJ"; then
+      echo "Root process completed successfully!"
+      break
+    else
+      echo "Root process still in progress... (waiting 5 seconds before next check)"
+    fi
+  fi
+  
+  RETRY_COUNT=$((RETRY_COUNT+1))
+  sleep 5
 done
+
+if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+  echo "Maximum retry count reached. The root process might still be running."
+  echo "You can check the progress manually by visiting http://$TOONIP/rsrc/log in your browser"
+  
+  # Laatste poging om de logs te tonen
+  FINAL_OUTPUT=`curl --connect-timeout 1 http://$TOONIP/rsrc/log 2>/dev/null`
+  if [ ! -z "$FINAL_OUTPUT" ]; then
+    echo "Latest log output:"
+    echo "-------------------------------------------------------"
+    echo "$FINAL_OUTPUT"
+    echo "-------------------------------------------------------"
+  fi
+  
+  echo "You can also try SSH'ing to the Toon: ssh root@$TOONIP (password: toon) if rooting was successful."
+fi
+
+echo "If root was successful, you can connect via SSH with:"
+echo "  ssh root@$TOONIP"
+echo "  password: toon"
 echo "-------------------------------------------------------"
